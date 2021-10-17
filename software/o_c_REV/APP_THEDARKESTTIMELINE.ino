@@ -34,6 +34,21 @@
 #define DT_PROBABILITY_TIMELINE 1
 #define DT_SETUP_SCREEN_TIMEOUT 166667
 
+#define DT_STEP_TRIG 0
+#define DT_RESET_TRIG 1
+// TODO: remove probability override gate and add record gates instead
+// #define DT_CV_RECORD_GATE 2
+// #define DT_PROB_RECORD_GATE 3
+#define DT_REVERSE_GATE 2
+#define DT_PROB100_GATE 3
+#define DT_CV_RECORD_CV 0
+#define DT_PROB_RECORD_CV 1
+// TODO: implement velocity CV and remove transpose CV
+// #define DT_STEP_VELOCITY_CV 2
+#define DT_TRANSPOSE_CV 3
+// TODO: refactor index as offset (possibly just for playback, for ASRish)
+#define DT_INDEX_CV 2
+
 enum {
     DT_LENGTH,
     DT_INDEX,
@@ -90,7 +105,7 @@ public:
 
         // Step forward with Digital 1
         int gate_ticks = HEMISPHERE_CLOCK_TICKS;
-        if (Clock(0)) {
+        if (Clock(DT_STEP_TRIG)) {
             last_tempo = OC::CORE::ticks - last_clock_event;
             last_clock_event = OC::CORE::ticks;
             if (gate_time() > 0) {
@@ -98,12 +113,12 @@ public:
             }
 
             // Reverse direction with gate at Digital 2
-            move_cursor(Gate(1) ? -1 : 1);
+            move_cursor(Gate(DT_REVERSE_GATE) ? -1 : 1);
             clocked = 1;
         }
 
-        // Reset sequencer with Digital 3
-        if (Clock(2)) {
+        // Reset sequencer with Digital 2
+        if (Clock(DT_RESET_TRIG)) {
             last_tempo = OC::CORE::ticks - last_clock_event;
             last_clock_event = OC::CORE::ticks;
             cursor = 0;
@@ -112,7 +127,7 @@ public:
 
         // Handle CV setting of the index from CV 3, if it's not being set from the panel
         if (!index_edit_enabled) {
-            int cv = DetentedIn(2);
+            int cv = DetentedIn(DT_INDEX_CV);
             if (cv > 0) {
                 int cv_index = cv / (HSAPPLICATION_5V / 32);
                 apply_value(DT_INDEX, cv_index);
@@ -139,7 +154,7 @@ public:
                         write_data_at(idx, tl, write_cv);
                     }
                 } else {
-                    cv = In(tl);
+                    cv = In(tl == 0 ? DT_CV_RECORD_CV : DT_PROB_RECORD_CV);
                     cv = constrain(cv, 0, HSAPPLICATION_5V);
                     write_data_at(idx, tl, cv);
                 }
@@ -149,7 +164,7 @@ public:
             cv = get_data_at(idx, tl);
 
             // Get transpose value from CV 4 over a range of 1 octave
-            int transpose_cv = DetentedIn(3);
+            int transpose_cv = DetentedIn(DT_TRANSPOSE_CV);
             int transpose = transpose_cv / 128;
 
             if (tl == 0) {
@@ -174,7 +189,7 @@ public:
 
                 // Calculate normal probability for Output 3
                 int prob = random(0, HSAPPLICATION_5V);
-                if (prob < cv || Gate(3)) { // Gate at digital 4 makes all probabilities certainties
+                if (prob < cv || Gate(DT_PROB100_GATE)) { // Gate at digital 4 makes all probabilities certainties
                     ClockOut(2, gate_ticks);
 
                     // Send the MIDI Note On
@@ -191,7 +206,7 @@ public:
 
                 // Calculate complementary probability for Output 4
                 prob = random(0, HSAPPLICATION_5V);
-                if (prob < (HSAPPLICATION_5V - cv) || Gate(3)) {
+                if (prob < (HSAPPLICATION_5V - cv)) {
                     ClockOut(3, gate_ticks);
 
                     // Send the MIDI Note On for Alternate Universe
@@ -222,7 +237,7 @@ public:
         if (--setup_screen_timeout_countdown < 0) {}
 
         // Advance to next step if a MIDI note was received and recorded
-        if (!Clock(0) && note_on && (record[0] || record[1])) move_cursor(1);
+        if (!Clock(DT_STEP_TRIG) && note_on && (record[0] || record[1])) move_cursor(1);
     }
 
     void View() {
@@ -327,12 +342,16 @@ public:
         index_edit_enabled = 1 - index_edit_enabled;
     }
 
+    void ToggleRecordStatus(int timeline_id) {
+        record[timeline_id] = 1 - record[timeline_id];
+    }
+
     void OnUpButtonPress() {
-        record[DT_CV_TIMELINE] = 1 - record[DT_CV_TIMELINE];
+        ToggleRecordStatus(DT_CV_TIMELINE);
     }
 
     void OnDownButtonPress() {
-        record[DT_PROBABILITY_TIMELINE] = 1 - record[DT_PROBABILITY_TIMELINE];
+        ToggleRecordStatus(DT_PROBABILITY_TIMELINE);
     }
 
     void OnDownButtonLongPress() {
