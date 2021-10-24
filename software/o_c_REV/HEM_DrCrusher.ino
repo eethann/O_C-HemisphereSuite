@@ -41,12 +41,18 @@ public:
                 // Convert CV to positive, 16-bit
                 int p_cv = cv + HEMISPHERE_MAX_CV;
                 uint16_t p_cv16 = static_cast<uint16_t>(p_cv);
-                p_cv16 = p_cv16 & mask;
-                cv = static_cast<int>(p_cv16) - HEMISPHERE_MAX_CV;
+                uint16_t crush_cv16 = p_cv16 & crush_mask;
+                cv = static_cast<int>(crush_cv16) - HEMISPHERE_MAX_CV;
                 Out(0, cv);
+                // Output a pulse if the LSB of one further bit resolution is 0
+                // e.g. if we're in the first half of the range of the crushed value
+                uint16_t pulse_cv16 = p_cv16 & pulse_mask;
+                GateOut(1, pulse_cv16 & 1 == 0);
             }
-        } else Out(0, In(0));
-        Out(1, In(0));
+        } else {
+            Out(0, In(0));
+            Out(1, 0);
+        }
     }
 
     void View() {
@@ -64,7 +70,9 @@ public:
             rate = constrain(rate - direction, 0, 7);
         } else {
             depth = constrain(depth + direction, 1, 13);
-            mask = get_mask();
+            // TODO move these and support CV in for crush amount
+            crush_mask = get_crush_mask();
+            pulse_mask = get_pulse_mask();
         }
     }
         
@@ -78,7 +86,8 @@ public:
     void OnDataReceive(uint32_t data) {
         rate = Unpack(data, PackLocation {0,3});
         depth = Unpack(data, PackLocation {3,4});
-        mask = get_mask();
+        crush_mask = get_crush_mask();
+        pulse_mask = get_pulse_mask();
     }
 
 protected:
@@ -86,7 +95,7 @@ protected:
         //                               "------------------" <-- Size Guide
         help[HEMISPHERE_HELP_DIGITALS] = "1=Defeat";
         help[HEMISPHERE_HELP_CVS]      = "1=Input";
-        help[HEMISPHERE_HELP_OUTS]     = "A=Crush B=Thru";
+        help[HEMISPHERE_HELP_OUTS]     = "A=Crush B=Pulse";
         help[HEMISPHERE_HELP_ENCODER]  = "Rate/Depth";
         //                               "------------------" <-- Size Guide
     }
@@ -98,7 +107,8 @@ private:
 
     // Housekeeping
     byte count = 0;
-    uint16_t mask = 0xffff;
+    uint16_t crush_mask = 0xffff;
+    uint16_t pulse_mask = 0xffff;
     
     void DrawInterface() {
         gfxPrint(1, 15, crusher_rate[rate]);
@@ -117,16 +127,29 @@ private:
         else gfxFrame(32 + w, 45, -w, 10);
     }
 
-    uint16_t get_mask() {
-        uint16_t mask = 0x0000;
-        for (byte b = 0; b <= depth; b++)
-        {
-            mask = mask << 1;
-            mask |= 0x01;
-        }
-        mask = mask << (13 - depth);
-        mask |= 0xc000; // Turn on the high two bits
+    uint16_t get_mask(int bit_depth) {
+        // I think this is equivalent to the for loop.
+        uint16_t mask = 0xFFFF;
+        mask = mask >> (13 - bit_depth);
+        mask = mask << (13 - bit_depth);
+        // uint16_t mask = 0x000;
+        // for (byte b = 0; b <= bit_depth; b++)
+        // {
+        //     mask = mask << 1;
+        //     mask |= 0x01;
+        // }
+        // mask = mask << (13 - bit_depth);
+        // mask |= 0xc000; // Turn on the high two bits
         return mask;
+    }
+
+    uint16_t get_crush_mask() {
+        return get_mask(depth);
+    }
+
+    // TODO determine how to handle max bit depth setting
+    uint16_t get_pulse_mask() {
+        return get_mask(depth + 1);
     }
 };
 
