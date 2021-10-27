@@ -36,7 +36,7 @@
     DECLARE_APPLET( 42, 0x11, EnvFollow), \
     DECLARE_APPLET( 29, 0x04, GateDelay), \
     DECLARE_APPLET( 17, 0x50, GatedVCA), \
-    DECLARE_APPLET( 200, 0x80, Intervalic), \
+    DECLARE_APPLET( 100, 0x10, Intervalic), \
     DECLARE_APPLET( 10, 0x44, Logic), \
     DECLARE_APPLET( 21, 0x01, LowerRenz), \
     DECLARE_APPLET( 50, 0x04, Metronome), \
