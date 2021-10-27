@@ -18,12 +18,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "braids_quantizer.h"
+#include "braids_quantizer_scales.h"
+#include "OC_scales.h"
+
 #define INTERVALIC_1V (12 << 7)
 #define INTERVALIC_1_12TH_V (INTERVALIC_1V / 12)
 
 enum {
     INTERVALIC_SETTING_INTERVAL,
-    INTERVALIC_SETTING_OFFSET,
+    INTERVALIC_SETTING_OFFSET_OR_SCALE,
     INTERVALIC_SETTING_ENABLED
 };
 
@@ -85,6 +89,8 @@ const simfloat intervals[20] = {
     0,
     0,
     1 * simfloat_12th,
+    // TODO determine if we need all these, might need to only have some to have
+    // enough space for storage.
     2 * simfloat_12th,
     3 * simfloat_12th,
     4 * simfloat_12th,
@@ -115,13 +121,16 @@ public:
     void Start() {
         cursor = 0;
         ForEachChannel(ch) {
+            quantizer[ch].Init();
+            scale[ch] = 4;
+            quantizer[ch].Configure(OC::Scales::GetScale(scale[ch]), 0xffff);
+            offset[ch] = 1;
             if (ch == 0) {
                 interval[ch] = INTERVALIC_ADDER;
-                offset[ch] = 0;
+                // TODO implement sample and hold instead of enabled for adders
                 enabled[ch] = true;
             } else {
-                interval[ch] = INTERVALIC_x3_2;
-                offset[ch] = 1;
+                interval[ch] = INTERVALIC_1_12th;
                 enabled[ch] = false;
             }
         }
@@ -169,13 +178,10 @@ public:
         }
         ForEachChannel(ch) {
             if (interval[ch] == INTERVALIC_ADDER) {
-                // Read CV for this channel
                 int32_t adder_cv = In(ch);
-                if (enabled[ch] != (bool)Gate(ch)) {
-                    Out(ch, constrain(adder_cv + interval_sum,-HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
-                } else {
-                    Out(ch, constrain(adder_cv,-HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
-                }
+                adder_cv += (enabled[ch] != (bool)Gate(ch)) ? interval_sum : 0;
+                adder_cv = quantizer[ch].Process(adder_cv, 0, 0);
+                Out(ch, constrain(adder_cv,-HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
             }
         }
     }
@@ -204,8 +210,15 @@ public:
             case INTERVALIC_SETTING_INTERVAL:
             interval[cursor_ch] = (interval[cursor_ch] + direction + 20) % 20;
             break;
-            case INTERVALIC_SETTING_OFFSET:
-            offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), -12);
+            case INTERVALIC_SETTING_OFFSET_OR_SCALE:
+            if (interval[cursor_ch] == INTERVALIC_ADDER) {
+                scale[cursor_ch] += direction;
+                if (scale[cursor_ch] >= OC::Scales::NUM_SCALES) scale[cursor_ch] = 0;
+                if (scale[cursor_ch] < 0) scale[cursor_ch] = OC::Scales::NUM_SCALES - 1;
+                quantizer[cursor_ch].Configure(OC::Scales::GetScale(scale[cursor_ch]), 0xffff);
+            } else {
+                offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), -12);
+            }
             break;
             case INTERVALIC_SETTING_ENABLED:
             enabled[cursor_ch] = !enabled[cursor_ch];
@@ -240,9 +253,9 @@ protected:
     void SetHelp() {
         //                               "------------------" <-- Size Guide
         help[HEMISPHERE_HELP_DIGITALS] = "Toggle on/off";
-        help[HEMISPHERE_HELP_CVS]      = "Adder In / # Steps";
+        help[HEMISPHERE_HELP_CVS]      = "Root / +- Steps";
         help[HEMISPHERE_HELP_OUTS]     = "Sum / Interval Val";
-        help[HEMISPHERE_HELP_ENCODER]  = "";
+        help[HEMISPHERE_HELP_ENCODER]  = "Type/Scale/Intrvl";
         //                               "------------------" <-- Size Guide
     }
     
@@ -251,19 +264,24 @@ private:
     int interval[2];
     int16_t offset[2];
     bool enabled[2];
+    // Quantizer for adder channels
+    braids::Quantizer quantizer[2];
+    int scale[2]; // Scale per channel
 
     void DrawInterface() {
         ForEachChannel(ch)
         {
             gfxPrint((1 + 31 * ch), 15, interval_names[interval[ch]]);
-            gfxPrint((1+ 31 * ch), 25, offset[ch]);
+            if (interval[ch] == INTERVALIC_ADDER) {
+                gfxPrint((1+ 31 * ch), 25, OC::scale_names_short[scale[ch]]);
+            } else {
+                gfxPrint((1+ 31 * ch), 25, offset[ch]);
+            }
             gfxIcon((1+ 31 * ch), 35, enabled[ch] ? CHECK_ON_ICON : CHECK_OFF_ICON);
         }
         // Draw cursor
         int cursor_ch      = cursor / 3;
         int cursor_setting = cursor % 3;
-        // if (cursor == 0 || cursor == 2) gfxCursor(0 + (31 * ch), 23, 30);
-        // else gfxCursor(10 + (31 * ch), 33, 12);
         gfxCursor(31 * cursor_ch, 25 + 10 * cursor_setting, 12);
     }
 };
