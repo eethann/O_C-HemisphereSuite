@@ -11,7 +11,7 @@
 // * Category filtering is deprecated at 1.8, but I'm leaving the per-applet categorization
 // alone to avoid breaking forked codebases by other developers.
 
-#define HEMISPHERE_AVAILABLE_APPLETS 51
+#define HEMISPHERE_AVAILABLE_APPLETS 50
 
 //////////////////  id  cat   class name
 #define HEMISPHERE_APPLETS { \
@@ -36,7 +36,7 @@
     DECLARE_APPLET( 42, 0x11, EnvFollow), \
     DECLARE_APPLET( 29, 0x04, GateDelay), \
     DECLARE_APPLET( 17, 0x50, GatedVCA), \
-    DECLARE_APPLET( 16, 0x80, LoFiPCM), \
+    DECLARE_APPLET( 200, 0x80, Intervalic), \
     DECLARE_APPLET( 10, 0x44, Logic), \
     DECLARE_APPLET( 21, 0x01, LowerRenz), \
     DECLARE_APPLET( 50, 0x04, Metronome), \
@@ -54,7 +54,6 @@
     DECLARE_APPLET( 36, 0x04, Shuffle), \
     DECLARE_APPLET(  7, 0x01, SkewedLFO), \
     DECLARE_APPLET( 19, 0x01, Slew), \
-    DECLARE_APPLET( 46, 0x08, Squanch), \
     DECLARE_APPLET(  3, 0x10, Switch), \
     DECLARE_APPLET( 13, 0x40, TLNeuron), \
     DECLARE_APPLET( 37, 0x40, Trending), \
