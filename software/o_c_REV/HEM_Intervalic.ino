@@ -112,7 +112,8 @@ const simfloat intervals[20] = {
 
 class Intervalic : public HemisphereApplet {
 public:
-
+    static int32_t interval_sum;
+    static uint32_t last_tick;
     const char* applet_name() { // Maximum 10 characters
         return "Intervalic";
     }
@@ -125,64 +126,102 @@ public:
             scale[ch] = 4;
             quantizer[ch].Configure(OC::Scales::GetScale(scale[ch]), 0xffff);
             offset[ch] = 1;
+            continuous[ch] = true;
+            adc_offset_clock[ch] = 0;
+            adc_offset_gate[ch] = 0;
+            toggle[ch] = false;
             if (ch == 0) {
-                interval[ch] = INTERVALIC_ADDER;
-                // TODO implement sample and hold instead of enabled for adders
-                enabled[ch] = true;
-            } else {
                 interval[ch] = INTERVALIC_1_12th;
-                enabled[ch] = false;
+            } else {
+                interval[ch] = INTERVALIC_ADDER;
             }
         }
+        interval_sum = 0;
+        last_tick = OC::CORE::ticks;
     }
 
 	/* Run during the interrupt service routine, 16667 times per second */
     void Controller() {
-        // TODO debug why interval count is always too high
         // TODO add support for 4 channel mode
-        // TODO figure out simfloat vs float
-        // TODO add start end end adc lag support to coordinate gate and cv timings
-        int32_t interval_sum = 0;
-        // First, go through all the non-adder channels and calculate the
-        // sum across all.
+        // WIP: use statics for 4 channel support. This means that only
+        // intervals to the left of adders will be included.
+        // static int32_t interval_sum;
+        // static int8_t last_ch;
+        if (last_tick != OC::CORE::ticks) {
+            interval_sum = 0;
+            last_tick = OC::CORE::ticks;
+        }
+
+        // Loop over all channels, accumulate the interval as we go.
+        // Note that this means that adder channels will only include intervals
+        // to the left of them in the panel. This is done to enable 4 channel
+        // operation, though that's still in progress.
         ForEachChannel(ch) {
-            if (interval[ch] != INTERVALIC_ADDER) {
-                // If the toggled state is enabled (enabled xor gate)
-                // TODO check for ADC lag issue here
-                if (enabled[ch] == (bool)Gate(ch)) {
-                    Out(ch, 0);
-                } else {
+            if (toggle[ch]) {
+                // Since we defer updating adc_offset_gate, don't start ADC if
+                // we are already waiting.
+                // Note that this might start to glitch if clock have a period of
+                // less than 33 cycles.
+                if (NoActiveADCLag(ch) && Gate(ch) != adc_offset_gate[ch]) {
+                    StartADCLag(ch);
+                }
+                if (EndOfADCLag(ch)) {
+                    adc_offset_gate[ch] = Gate(ch);
+                }
+                // This was a test to see if it worked to use continuous with toggle
+                // if (adc_offset_gate[ch]) {
+                //     continuous[ch] = false;
+                // }
+                // update_channel_cv[ch] = continuous[ch] || adc_offset_gate[ch];
+                // bypass_channel_cv[ch] = !continuous[ch] && !adc_offset_gate[ch];
+                update_channel_cv[ch] = adc_offset_gate[ch];
+                bypass_channel_cv[ch] = !adc_offset_gate[ch];
+            } else {
+                // if (Clock(ch) != adc_offset_clock[ch]) {
+                //     adc_offset_clock[ch] = Clock(ch);
+                //     if (adc_offset_clock[ch]) {
+                //     }
+                // }
+                if (Clock(ch)) {
+                    StartADCLag(ch);
+                    continuous[ch] = false;
+                }
+                update_channel_cv[ch] = (continuous[ch] || EndOfADCLag(ch));
+                bypass_channel_cv[ch] = false;
+            }
+            if (interval[ch] == INTERVALIC_ADDER) {
+                // If continuous, toggling (low or high), or in s/h and clocked,
+                // update adder CV. This is different from intervals, that
+                // output zero in toggle with low gate.
+                if (update_channel_cv[ch] || bypass_channel_cv[ch]) {
+                    channel_cv[ch] = In(ch);
+                    if (!bypass_channel_cv[ch]) {
+                        channel_cv[ch] += interval_sum;
+                    } 
+                    channel_cv[ch] = quantizer[ch].Process(channel_cv[ch], 0, 0);
+                }
+            } else {
+                // Handle interval channel
+                if (update_channel_cv[ch]) {
                     // Read CV for this channel
-                    int32_t interval_cv = In(ch);
+                    channel_cv[ch] = In(ch);
                     if (interval[ch] == INTERVALIC_FREE) {
-                        // If this is a free interval, just pass the CV through
-                        // TODO determine if we need to handle negative values
-                        // Add to interval_sum
-                        interval_sum += interval_cv;
-                        // Output this interval
-                        Out(ch, constrain(interval_cv, -HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
+                        if (abs(offset[ch]) > 0) {
+                            channel_cv[ch] = (channel_cv[ch] / abs(offset[ch] * 128)) * abs(offset[ch] * 128);
+                        }
                     } else {
                         // Otherwise use the CV to determine the number of intervals
                         // TODO determine if we need to handle negative values
-                        int32_t num_intervals = offset[ch] + (interval_cv / INTERVALIC_1V);
+                        int32_t num_intervals = offset[ch] + (channel_cv[ch] / INTERVALIC_1V);
                         // Multiply by interval amount
-                        int32_t interval_val = simfloat2int(intervals[interval[ch]] * num_intervals);
-                        // Output this interval
-                        Out(ch, min(max(interval_val, -HEMISPHERE_3V_CV), HEMISPHERE_MAX_CV));
-                        // Proportion(intervals[interval[ch]], INTERVALIC_1V, num_intervals);
-                        // Add to interval_sum
-                        interval_sum += interval_val;
-                    }
+                        channel_cv[ch] = simfloat2int(intervals[interval[ch]] * num_intervals);
+                    } 
+                } else if (bypass_channel_cv[ch]) {
+                    channel_cv[ch] = 0;
                 }
+                interval_sum += channel_cv[ch];
             }
-        }
-        ForEachChannel(ch) {
-            if (interval[ch] == INTERVALIC_ADDER) {
-                int32_t adder_cv = In(ch);
-                adder_cv += (enabled[ch] != (bool)Gate(ch)) ? interval_sum : 0;
-                adder_cv = quantizer[ch].Process(adder_cv, 0, 0);
-                Out(ch, constrain(adder_cv,-HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
-            }
+            Out(ch, constrain(channel_cv[ch], -HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
         }
     }
 
@@ -209,19 +248,29 @@ public:
         switch (cursor_setting) {
             case INTERVALIC_SETTING_INTERVAL:
             interval[cursor_ch] = (interval[cursor_ch] + direction + 20) % 20;
+            if (interval[cursor_ch] == INTERVALIC_ADDER) {
+                // Set new adder to continuous at start.
+                continuous[cursor_ch] = 1;
+            }
             break;
             case INTERVALIC_SETTING_OFFSET_OR_SCALE:
             if (interval[cursor_ch] == INTERVALIC_ADDER) {
+                // Reset continuous on scale change.
+                continuous[cursor_ch] = 1;
                 scale[cursor_ch] += direction;
                 if (scale[cursor_ch] >= OC::Scales::NUM_SCALES) scale[cursor_ch] = 0;
                 if (scale[cursor_ch] < 0) scale[cursor_ch] = OC::Scales::NUM_SCALES - 1;
                 quantizer[cursor_ch].Configure(OC::Scales::GetScale(scale[cursor_ch]), 0xffff);
+            } else if (interval[cursor_ch] == INTERVALIC_FREE) {
+                offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), 0);
             } else {
                 offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), -12);
             }
             break;
             case INTERVALIC_SETTING_ENABLED:
-            enabled[cursor_ch] = !enabled[cursor_ch];
+            toggle[cursor_ch] = !toggle[cursor_ch];
+            // Reset continuous operation when s/h / toggle mode is toggled
+            continuous[cursor_ch] = 1;
             break;
         }
     }
@@ -230,11 +279,22 @@ public:
      * the manager, OnDataRequest() packs it up (see HemisphereApplet::Pack()) and
      * returns it.
      */
-    // FIXME implement data loading and saving.
     uint32_t OnDataRequest() {
         uint32_t data = 0;
-        // example: pack property_name at bit 0, with size of 8 bits
-        // Pack(data, PackLocation {0,8}, property_name); 
+        Pack(data, PackLocation {0,5}, interval[0]);
+        Pack(data, PackLocation {5,5}, interval[1]);
+        Pack(data, PackLocation {10,1}, toggle[0]);
+        Pack(data, PackLocation {11,1}, toggle[1]);
+        int delta = 0;
+        ForEachChannel(ch) {
+            if (interval[ch] == INTERVALIC_ADDER) {
+                Pack(data, PackLocation{12 + delta, 8}, (int8_t)scale[ch]);
+                delta = 8;
+            } else {
+                Pack(data, PackLocation{12 + delta, 4}, offset[ch]);
+                delta = 4;
+            } 
+        }
         return data;
     }
 
@@ -244,48 +304,102 @@ public:
      * properties.
      */
     void OnDataReceive(uint32_t data) {
-        // example: unpack value at bit 0 with size of 8 bits to property_name
-        // property_name = Unpack(data, PackLocation {0,8}); 
+        interval[0] = Unpack(data, PackLocation {0,5});
+        interval[1] = Unpack(data, PackLocation {5,5});
+        toggle[0] = Unpack(data, PackLocation {10,1});
+        toggle[1] = Unpack(data, PackLocation {11,1});
+        int delta = 0;
+        ForEachChannel(ch) {
+            if (interval[ch] == INTERVALIC_ADDER) {
+                scale[ch] = Unpack(data, PackLocation{12 + delta, 8});
+                offset[ch] = 1;
+                delta = 8;
+            } else {
+                offset[ch] = Unpack(data, PackLocation{12 + delta, 4});
+                scale[ch] = 4;
+                delta = 4;
+            } 
+            quantizer[ch].Configure(OC::Scales::GetScale(scale[ch]), 0xffff);
+        }
     }
 
 protected:
     /* Set help text. Each help section can have up to 18 characters. Be concise! */
     void SetHelp() {
         //                               "------------------" <-- Size Guide
-        help[HEMISPHERE_HELP_DIGITALS] = "Toggle on/off";
-        help[HEMISPHERE_HELP_CVS]      = "Root / +- Steps";
-        help[HEMISPHERE_HELP_OUTS]     = "Sum / Interval Val";
+        help[HEMISPHERE_HELP_DIGITALS] = "Toggle";
+        help[HEMISPHERE_HELP_CVS]      = "Val";
+        help[HEMISPHERE_HELP_OUTS]     = "Sum / Interval";
         help[HEMISPHERE_HELP_ENCODER]  = "Type/Scale/Intrvl";
         //                               "------------------" <-- Size Guide
     }
     
 private:
     int cursor;
-    int interval[2];
-    int16_t offset[2];
-    bool enabled[2];
+    bool continuous[2]; // Each channel starts as continuous and becomes clocked when a clock is received
+    int32_t channel_cv[2]; // Store each interval cv for sample and hold
+    bool update_channel_cv[2];
+    bool bypass_channel_cv[2];
+
+    // Cache gate to detect change
+    bool adc_offset_gate[2];
+    bool adc_offset_clock[2];
+
     // Quantizer for adder channels
     braids::Quantizer quantizer[2];
-    int scale[2]; // Scale per channel
+
+    // Settings
+    int interval[2]; // 5 bits each = 10
+    int16_t offset[2]; // could be 3 bits each = 6
+
+    // TODO refactor toggle to toggle between s/h and enabled
+    bool toggle[2]; // 1 bit each = 2
+    int scale[2]; // Scale per channel, 7 bits each?
 
     void DrawInterface() {
+        int top = 17;
+        int yspace = 12;
         ForEachChannel(ch)
         {
             gfxPrint((1 + 31 * ch), 15, interval_names[interval[ch]]);
             if (interval[ch] == INTERVALIC_ADDER) {
-                gfxPrint((1+ 31 * ch), 25, OC::scale_names_short[scale[ch]]);
+                gfxPrint((1+ 31 * ch), top + yspace, OC::scale_names_short[scale[ch]]);
             } else {
-                gfxPrint((1+ 31 * ch), 25, offset[ch]);
+                gfxPrint((1+ 31 * ch), top + yspace, offset[ch]);
             }
-            gfxIcon((1+ 31 * ch), 35, enabled[ch] ? CHECK_ON_ICON : CHECK_OFF_ICON);
+            if (toggle[ch]) {
+                if (update_channel_cv[ch]) {
+                    gfxIcon((1 + 31 * ch), top + 2 * yspace, CHECK_ON_ICON);
+                } else {
+                    gfxIcon((1 + 31 * ch), top + 2 * yspace, CHECK_OFF_ICON);
+                }
+            } else {
+                if (continuous[ch]) {
+                    gfxPrint((1 + 31 * ch), top + 2 * yspace, "CONT");
+                } else {
+                    gfxPrint((1 + 31 * ch), top + 2 * yspace, "S/H");
+                }
+            }
+            // if (update_channel_cv[ch]) {
+            //     gfxPrint((1 + 31 * ch), 42, "u");
+            // }
+            // if (bypass_channel_cv[ch]) {
+            //     gfxPrint((9 + 31 * ch), 42, "b");
+            // }
+            // if (continuous[ch]) {
+            //     gfxPrint((17 + 31 * ch), 42, "c");
+            // }
         }
         // Draw cursor
         int cursor_ch      = cursor / 3;
         int cursor_setting = cursor % 3;
-        gfxCursor(31 * cursor_ch, 25 + 10 * cursor_setting, 12);
+        gfxCursor(31 * cursor_ch, top + yspace * (1 + cursor_setting), 12);
     }
 };
 
+// Initialize the interval static to track between hemispheres
+int32_t Intervalic::interval_sum = 0;
+uint32_t Intervalic::last_tick = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Hemisphere Applet Functions
