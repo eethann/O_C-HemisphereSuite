@@ -91,7 +91,7 @@ public:
             clock_countdown[ch]  = 0;
             inputs[ch] = 0;
             outputs[ch] = 0;
-            adc_lag_countdown[ch] = 0;
+            adc_lag_end_tick[ch] = 0;
         }
         help_active = 0;
         cursor_countdown = HEMISPHERE_CURSOR_TICKS;
@@ -443,11 +443,17 @@ protected:
      * }
      */
     void StartADCLag(int ch = 0) {
-        adc_lag_countdown[ch] = HEMISPHERE_ADC_LAG;
+        // TODO: instead of decrementing, log the tick where the lag will be
+        // done, return OC::Core::ticks == endoflag_tick
+        adc_lag_end_tick[ch] = OC::CORE::ticks + HEMISPHERE_ADC_LAG;
     }
 
     bool EndOfADCLag(int ch = 0) {
-        return (--adc_lag_countdown[ch] == 0);
+        return (OC::CORE::ticks == adc_lag_end_tick[ch]);
+    }
+
+    bool NoActiveADCLag(int ch = 0) {
+        return (OC::CORE::ticks > adc_lag_end_tick[ch]);
     }
 
     /* Master Clock Forwarding is activated. This is updated with each ISR cycle by the Hemisphere Manager */
@@ -462,7 +468,7 @@ private:
     uint32_t cycle_ticks[2]; // Number of ticks between last two clocks
     int clock_countdown[2];
     int cursor_countdown;
-    int adc_lag_countdown[2]; // Time between a clock event and an ADC read event
+    uint32_t adc_lag_end_tick[2]; // Time between a clock event and an ADC read event
     bool master_clock_bus; // Clock forwarding was on during the last ISR cycle
     bool applet_started; // Allow the app to maintain state during switching
     int last_view_tick; // Tick number of the most recent view
