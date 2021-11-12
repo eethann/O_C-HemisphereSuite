@@ -25,15 +25,21 @@
 #define INTERVALIC_1V (12 << 7)
 #define INTERVALIC_1_12TH_V (INTERVALIC_1V / 12)
 
+#define INTERVALIC_UI_TOP 16
+#define INTERVALIC_UI_LINE_HEIGHT 11
+#define INTERVALIC_UI_COL_WIDTH 31
+#define INTERVALIC_UI_SH_SHOW_TIME 50
+
 enum {
     INTERVALIC_SETTING_INTERVAL,
-    INTERVALIC_SETTING_OFFSET_OR_SCALE,
+    INTERVALIC_SETTING_BASE_OR_SCALE,
     INTERVALIC_SETTING_ENABLED
 };
 
 enum {
     INTERVALIC_ADDER, 
-    INTERVALIC_FREE,
+    INTERVALIC_OFFSET,
+    INTERVALIC_SCALE_DEGREE,
     INTERVALIC_1_12th,
     INTERVALIC_2_12th,
     INTERVALIC_3_12th,
@@ -54,9 +60,10 @@ enum {
     INTERVALIC_x7_4
 };
 
-const char* const interval_names[20] = {
+const char* const interval_names[21] = {
     "ADDER", 
-    "FREE",
+    "CV",
+    "DEGR",
     "+1",
     "+2",
     "+3",
@@ -85,7 +92,8 @@ const simfloat simfloat_log2_7 = (int32_t)(log2(7) * pow2_14);
 
 // TODO see if this can optimized away from floats
 // (it's not clear how to use something like simfloat w/ logs)
-const simfloat intervals[20] = { 
+const simfloat intervals[21] = { 
+    0,
     0,
     0,
     1 * simfloat_12th,
@@ -113,6 +121,7 @@ const simfloat intervals[20] = {
 class Intervalic : public HemisphereApplet {
 public:
     static int32_t interval_sum;
+    static int32_t scale_degree_sum;
     static uint32_t last_tick;
     const char* applet_name() { // Maximum 10 characters
         return "Intervalic";
@@ -125,7 +134,7 @@ public:
             quantizer[ch].Init();
             scale[ch] = 4;
             quantizer[ch].Configure(OC::Scales::GetScale(scale[ch]), 0xffff);
-            offset[ch] = 1;
+            base[ch] = 1;
             continuous[ch] = true;
             adc_offset_clock[ch] = 0;
             adc_offset_gate[ch] = 0;
@@ -137,6 +146,7 @@ public:
             }
         }
         interval_sum = 0;
+        scale_degree_sum = 0;
         last_tick = OC::CORE::ticks;
     }
 
@@ -149,6 +159,7 @@ public:
         // static int8_t last_ch;
         if (last_tick != OC::CORE::ticks) {
             interval_sum = 0;
+            scale_degree_sum = 0;
             last_tick = OC::CORE::ticks;
         }
 
@@ -175,6 +186,7 @@ public:
                 // update_channel_cv[ch] = continuous[ch] || adc_offset_gate[ch];
                 // bypass_channel_cv[ch] = !continuous[ch] && !adc_offset_gate[ch];
                 update_channel_cv[ch] = adc_offset_gate[ch];
+                update_channel_cv_ui[ch] = update_channel_cv[ch] ? 1 : 0;
                 bypass_channel_cv[ch] = !adc_offset_gate[ch];
             } else {
                 // if (Clock(ch) != adc_offset_clock[ch]) {
@@ -182,11 +194,15 @@ public:
                 //     if (adc_offset_clock[ch]) {
                 //     }
                 // }
-                if (Clock(ch)) {
+                if (Clock(ch) && NoActiveADCLag(ch)) {
                     StartADCLag(ch);
                     continuous[ch] = false;
                 }
                 update_channel_cv[ch] = (continuous[ch] || EndOfADCLag(ch));
+                // Set the update channel ui flag to update on the next ui draw
+                if (!update_channel_cv_ui[ch] && update_channel_cv[ch]) {
+                    update_channel_cv_ui[ch] = INTERVALIC_UI_SH_SHOW_TIME;
+                }
                 bypass_channel_cv[ch] = false;
             }
             if (interval[ch] == INTERVALIC_ADDER) {
@@ -198,21 +214,32 @@ public:
                     if (!bypass_channel_cv[ch]) {
                         channel_cv[ch] += interval_sum;
                     } 
-                    channel_cv[ch] = quantizer[ch].Process(channel_cv[ch], 0, 0);
+                    channel_cv[ch] = quantizer[ch].Process(channel_cv[ch], 0, scale_degree_sum);
+                }
+            } else if (interval[ch] == INTERVALIC_SCALE_DEGREE) {
+                if (update_channel_cv[ch]) {
+                    channel_cv[ch] = In(ch);
+                    // TODO look into using the interval approach for this
+                    // (e.g. specify an interval as scale degree, then a base amount to use)
+                    scale_degree_sum += channel_cv[ch] / 128 + base[ch];
+                } else if (bypass_channel_cv[ch]) {
+                    channel_cv[ch] = 0;
                 }
             } else {
                 // Handle interval channel
                 if (update_channel_cv[ch]) {
                     // Read CV for this channel
                     channel_cv[ch] = In(ch);
-                    if (interval[ch] == INTERVALIC_FREE) {
-                        if (abs(offset[ch]) > 0) {
-                            channel_cv[ch] = (channel_cv[ch] / abs(offset[ch] * 128)) * abs(offset[ch] * 128);
+                    if (interval[ch] == INTERVALIC_OFFSET) {
+                        if (abs(base[ch]) > 0) {
+                            int32_t steps = semi_quant[ch].Process(channel_cv[ch]);
+                            channel_cv[ch] = ((steps / base[ch]) * base[ch]) << 7;
+                            // channel_cv[ch] = (channel_cv[ch] / abs(base[ch] * 128)) * abs(base[ch] * 128);
                         }
                     } else {
                         // Otherwise use the CV to determine the number of intervals
                         // TODO determine if we need to handle negative values
-                        int32_t num_intervals = offset[ch] + (channel_cv[ch] / INTERVALIC_1V);
+                        int32_t num_intervals = base[ch] + (channel_cv[ch] / INTERVALIC_1V);
                         // Multiply by interval amount
                         channel_cv[ch] = simfloat2int(intervals[interval[ch]] * num_intervals);
                     } 
@@ -247,13 +274,13 @@ public:
         int cursor_ch = cursor / 3;
         switch (cursor_setting) {
             case INTERVALIC_SETTING_INTERVAL:
-            interval[cursor_ch] = (interval[cursor_ch] + direction + 20) % 20;
+            interval[cursor_ch] = (interval[cursor_ch] + direction + 21) % 21;
             if (interval[cursor_ch] == INTERVALIC_ADDER) {
                 // Set new adder to continuous at start.
                 continuous[cursor_ch] = 1;
             }
             break;
-            case INTERVALIC_SETTING_OFFSET_OR_SCALE:
+            case INTERVALIC_SETTING_BASE_OR_SCALE:
             if (interval[cursor_ch] == INTERVALIC_ADDER) {
                 // Reset continuous on scale change.
                 continuous[cursor_ch] = 1;
@@ -261,10 +288,10 @@ public:
                 if (scale[cursor_ch] >= OC::Scales::NUM_SCALES) scale[cursor_ch] = 0;
                 if (scale[cursor_ch] < 0) scale[cursor_ch] = OC::Scales::NUM_SCALES - 1;
                 quantizer[cursor_ch].Configure(OC::Scales::GetScale(scale[cursor_ch]), 0xffff);
-            } else if (interval[cursor_ch] == INTERVALIC_FREE) {
-                offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), 0);
+            } else if (interval[cursor_ch] == INTERVALIC_OFFSET) {
+                base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), 0);
             } else {
-                offset[cursor_ch] = max(min(offset[cursor_ch] + direction, 12), -12);
+                base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), -12);
             }
             break;
             case INTERVALIC_SETTING_ENABLED:
@@ -289,10 +316,10 @@ public:
         ForEachChannel(ch) {
             if (interval[ch] == INTERVALIC_ADDER) {
                 Pack(data, PackLocation{12 + delta, 8}, (int8_t)scale[ch]);
-                delta = 8;
+                delta += 8;
             } else {
-                Pack(data, PackLocation{12 + delta, 4}, offset[ch]);
-                delta = 4;
+                Pack(data, PackLocation{12 + delta, 4}, base[ch]);
+                delta += 4;
             } 
         }
         return data;
@@ -312,12 +339,12 @@ public:
         ForEachChannel(ch) {
             if (interval[ch] == INTERVALIC_ADDER) {
                 scale[ch] = Unpack(data, PackLocation{12 + delta, 8});
-                offset[ch] = 1;
-                delta = 8;
+                base[ch] = 1;
+                delta += 8;
             } else {
-                offset[ch] = Unpack(data, PackLocation{12 + delta, 4});
+                base[ch] = Unpack(data, PackLocation{12 + delta, 4});
                 scale[ch] = 4;
-                delta = 4;
+                delta += 4;
             } 
             quantizer[ch].Configure(OC::Scales::GetScale(scale[ch]), 0xffff);
         }
@@ -338,6 +365,7 @@ private:
     int cursor;
     bool continuous[2]; // Each channel starts as continuous and becomes clocked when a clock is received
     int32_t channel_cv[2]; // Store each interval cv for sample and hold
+    uint update_channel_cv_ui[2];
     bool update_channel_cv[2];
     bool bypass_channel_cv[2];
 
@@ -347,41 +375,85 @@ private:
 
     // Quantizer for adder channels
     braids::Quantizer quantizer[2];
+    // Semitone quantizer for Free CV quantization
+    OC::SemitoneQuantizer semi_quant[2];
 
     // Settings
     int interval[2]; // 5 bits each = 10
-    int16_t offset[2]; // could be 3 bits each = 6
+    // base is the start # of intervals to offset by in interval mode
+    // in offset mode it's the # of semis to quantize to
+    // or the number of steps by default
+    int16_t base[2]; // could be 3 bits each = 6
 
     // TODO refactor toggle to toggle between s/h and enabled
     bool toggle[2]; // 1 bit each = 2
     int scale[2]; // Scale per channel, 7 bits each?
+    // Whether this channel should output an accumulation of all prior or just
+    // itself. For adders whether it should contribute to the interval sum.
+    bool accumulator[2]; 
+
+    int uiColX(int col) {
+        return (1 + INTERVALIC_UI_COL_WIDTH * col);
+    }
+
+    int uiLineY(int line_num) {
+        return INTERVALIC_UI_TOP + INTERVALIC_UI_LINE_HEIGHT * line_num;
+    }
 
     void DrawInterface() {
-        int top = 17;
-        int yspace = 12;
-        ForEachChannel(ch)
-        {
-            gfxPrint((1 + 31 * ch), 15, interval_names[interval[ch]]);
-            if (interval[ch] == INTERVALIC_ADDER) {
-                gfxPrint((1+ 31 * ch), top + yspace, OC::scale_names_short[scale[ch]]);
-            } else {
-                gfxPrint((1+ 31 * ch), top + yspace, offset[ch]);
+        int ch_col_x;
+        ForEachChannel(ch) {
+            ch_col_x = uiColX(ch);
+            switch (interval[ch]) {
+                case INTERVALIC_ADDER:
+                gfxPrint(ch_col_x, uiLineY(0), "ADDER");
+                gfxPrint(ch_col_x, uiLineY(1), "scal:");
+                gfxPrint(ch_col_x, uiLineY(2), OC::scale_names_short[scale[ch]]);
+                break;
+                case INTERVALIC_OFFSET:
+                gfxPrint(ch_col_x, uiLineY(0), "OFFST");
+                gfxPrint(ch_col_x, uiLineY(1), "qntz:");
+                if (base[ch]) {
+                    gfxPrint(ch_col_x, uiLineY(2), base[ch]);
+                    gfxPrint(ch_col_x + 12, uiLineY(2), "S");
+                } else {
+                    gfxPrint(ch_col_x, uiLineY(2), "off");
+                }
+                break;
+                case INTERVALIC_SCALE_DEGREE:
+                gfxPrint(ch_col_x, uiLineY(0), "TRNSP");
+                gfxPrint(ch_col_x, uiLineY(1), "step:");
+                gfxPrint(ch_col_x, uiLineY(2), base[ch]);
+                break;
+                default:
+                gfxPrint(ch_col_x, uiLineY(0), "INTVL");
+                gfxPrint(ch_col_x, uiLineY(1), interval_names[interval[ch]]);
+                gfxPrint(ch_col_x, uiLineY(2), "#:");
+                gfxPrint(ch_col_x + 12, uiLineY(2), base[ch]);
+                break;
             }
             if (toggle[ch]) {
-                if (update_channel_cv[ch]) {
-                    gfxIcon((1 + 31 * ch), top + 2 * yspace, CHECK_ON_ICON);
+                gfxPrint(ch_col_x, uiLineY(3), "TOGL");
+                if (update_channel_cv_ui[ch]) {
+                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_ON_ICON);
                 } else {
-                    gfxIcon((1 + 31 * ch), top + 2 * yspace, CHECK_OFF_ICON);
+                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_OFF_ICON);
                 }
             } else {
+                gfxPrint(ch_col_x, uiLineY(3), "S/H");
                 if (continuous[ch]) {
-                    gfxPrint((1 + 31 * ch), top + 2 * yspace, "CONT");
+                    gfxIcon(ch_col_x + 24, uiLineY(3), PLAY_ICON);
                 } else {
-                    gfxPrint((1 + 31 * ch), top + 2 * yspace, "S/H");
+                    if (update_channel_cv_ui[ch]) {
+                        gfxIcon(ch_col_x + 24, uiLineY(3), RECORD_ICON);
+                        update_channel_cv_ui[ch]--;
+                    } else {
+                        gfxIcon(ch_col_x + 24, uiLineY(3), PLAY_ICON);
+                    }
                 }
             }
             // if (update_channel_cv[ch]) {
-            //     gfxPrint((1 + 31 * ch), 42, "u");
+            //     gfxPrint((ch_col_x), 42, "u");
             // }
             // if (bypass_channel_cv[ch]) {
             //     gfxPrint((9 + 31 * ch), 42, "b");
@@ -393,12 +465,27 @@ private:
         // Draw cursor
         int cursor_ch      = cursor / 3;
         int cursor_setting = cursor % 3;
-        gfxCursor(31 * cursor_ch, top + yspace * (1 + cursor_setting), 12);
+        if (cursor_setting > 0 || interval[cursor_ch] > INTERVALIC_SCALE_DEGREE) {
+            gfxCursor(uiColX(cursor_ch), uiLineY(cursor_setting + 2) - 3, 12);
+        } else {
+            gfxCursor(uiColX(cursor_ch), uiLineY(cursor_setting + 1) - 3, 12);
+        }
+        if (cursor_setting == 0){
+            if (interval[cursor_ch] > INTERVALIC_SCALE_DEGREE) {
+                gfxInvert(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * 2);
+            } else {
+                gfxInvert(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT);
+            }
+        } else {
+            gfxInvert(uiColX(cursor_ch), uiLineY(cursor_setting + 1) - 2, 31, INTERVALIC_UI_LINE_HEIGHT);
+        }
+        gfxFrame(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * 4);
     }
 };
 
 // Initialize the interval static to track between hemispheres
 int32_t Intervalic::interval_sum = 0;
+int32_t Intervalic::scale_degree_sum = 0;
 uint32_t Intervalic::last_tick = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
