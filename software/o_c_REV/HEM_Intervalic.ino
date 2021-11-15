@@ -231,11 +231,7 @@ public:
                     // Read CV for this channel
                     channel_cv[ch] = In(ch);
                     if (interval[ch] == INTERVALIC_OFFSET) {
-                        if (abs(base[ch]) > 0) {
-                            int32_t steps = semi_quant[ch].Process(channel_cv[ch]);
-                            channel_cv[ch] = ((steps / base[ch]) * base[ch]) << 7;
-                            // channel_cv[ch] = (channel_cv[ch] / abs(base[ch] * 128)) * abs(base[ch] * 128);
-                        }
+                        channel_cv[ch] += base[ch] * 128;
                     } else {
                         // Otherwise use the CV to determine the number of intervals
                         // TODO determine if we need to handle negative values
@@ -288,8 +284,6 @@ public:
                 if (scale[cursor_ch] >= OC::Scales::NUM_SCALES) scale[cursor_ch] = 0;
                 if (scale[cursor_ch] < 0) scale[cursor_ch] = OC::Scales::NUM_SCALES - 1;
                 quantizer[cursor_ch].Configure(OC::Scales::GetScale(scale[cursor_ch]), 0xffff);
-            } else if (interval[cursor_ch] == INTERVALIC_OFFSET) {
-                base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), 0);
             } else {
                 base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), -12);
             }
@@ -375,8 +369,6 @@ private:
 
     // Quantizer for adder channels
     braids::Quantizer quantizer[2];
-    // Semitone quantizer for Free CV quantization
-    OC::SemitoneQuantizer semi_quant[2];
 
     // Settings
     int interval[2]; // 5 bits each = 10
