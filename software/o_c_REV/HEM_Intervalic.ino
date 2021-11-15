@@ -285,6 +285,7 @@ public:
                 if (scale[cursor_ch] < 0) scale[cursor_ch] = OC::Scales::NUM_SCALES - 1;
                 quantizer[cursor_ch].Configure(OC::Scales::GetScale(scale[cursor_ch]), 0xffff);
             } else {
+                // TODO determine if this should / can be increased
                 base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), -12);
             }
             break;
@@ -350,8 +351,8 @@ protected:
         //                               "------------------" <-- Size Guide
         help[HEMISPHERE_HELP_DIGITALS] = "Toggle";
         help[HEMISPHERE_HELP_CVS]      = "Val";
-        help[HEMISPHERE_HELP_OUTS]     = "Sum / Interval";
-        help[HEMISPHERE_HELP_ENCODER]  = "Type/Scale/Intrvl";
+        help[HEMISPHERE_HELP_OUTS]     = "Sum/CV";
+        help[HEMISPHERE_HELP_ENCODER]  = "";
         //                               "------------------" <-- Size Guide
     }
     
@@ -380,13 +381,6 @@ private:
     // TODO refactor toggle to toggle between s/h and enabled
     bool toggle[2]; // 1 bit each = 2
     int scale[2]; // Scale per channel, 7 bits each?
-    // Whether this channel should output an accumulation of all prior or just
-    // itself. For adders whether it should contribute to the interval sum.
-    bool accumulator[2]; 
-
-    int uiColX(int col) {
-        return (1 + INTERVALIC_UI_COL_WIDTH * col);
-    }
 
     int uiLineY(int line_num) {
         return INTERVALIC_UI_TOP + INTERVALIC_UI_LINE_HEIGHT * line_num;
@@ -395,34 +389,42 @@ private:
     void DrawInterface() {
         int ch_col_x;
         ForEachChannel(ch) {
-            ch_col_x = uiColX(ch);
+            ch_col_x = (1 + INTERVALIC_UI_COL_WIDTH * ch);
             switch (interval[ch]) {
                 case INTERVALIC_ADDER:
                 gfxPrint(ch_col_x, uiLineY(0), "ADDER");
-                gfxPrint(ch_col_x, uiLineY(1), "scal:");
-                gfxPrint(ch_col_x, uiLineY(2), OC::scale_names_short[scale[ch]]);
+                gfxPrint(ch_col_x, uiLineY(1), OC::scale_names_short[scale[ch]]);
+                gfxPrint(ch_col_x, uiLineY(2), "quant");
                 break;
                 case INTERVALIC_OFFSET:
                 gfxPrint(ch_col_x, uiLineY(0), "OFFST");
-                gfxPrint(ch_col_x, uiLineY(1), "qntz:");
-                if (base[ch]) {
-                    gfxPrint(ch_col_x, uiLineY(2), base[ch]);
-                    gfxPrint(ch_col_x + 12, uiLineY(2), "S");
+                if (base[ch] > 0) {
+                    gfxPrint(ch_col_x, uiLineY(1), "+");
+                    gfxPrint(ch_col_x + 6, uiLineY(1), base[ch]);
                 } else {
-                    gfxPrint(ch_col_x, uiLineY(2), "off");
+                    gfxPrint(ch_col_x, uiLineY(1), base[ch]);
                 }
+                gfxPrint(ch_col_x, uiLineY(2), "semi");
                 break;
                 case INTERVALIC_SCALE_DEGREE:
                 gfxPrint(ch_col_x, uiLineY(0), "TRNSP");
-                gfxPrint(ch_col_x, uiLineY(1), "step:");
-                gfxPrint(ch_col_x, uiLineY(2), base[ch]);
+                if (base[ch] > 0) {
+                    gfxPrint(ch_col_x, uiLineY(1), "+");
+                    gfxPrint(ch_col_x + 6, uiLineY(1), base[ch]);
+                } else {
+                    gfxPrint(ch_col_x, uiLineY(1), base[ch]);
+                }
+                gfxPrint(ch_col_x, uiLineY(2), "steps");
                 break;
                 default:
                 gfxPrint(ch_col_x, uiLineY(0), "INTVL");
                 gfxPrint(ch_col_x, uiLineY(1), interval_names[interval[ch]]);
-                gfxPrint(ch_col_x, uiLineY(2), "#:");
-                gfxPrint(ch_col_x + 12, uiLineY(2), base[ch]);
+                gfxPrint(ch_col_x, uiLineY(2), "x");
+                gfxPrint(ch_col_x + 6, uiLineY(2), base[ch]);
                 break;
+            }
+            if (interval[ch] != INTERVALIC_ADDER && abs(In(ch)) > 128 ) {
+                gfxIcon(ch_col_x + 20, uiLineY(1 + (interval[ch] > INTERVALIC_SCALE_DEGREE ? 1 : 0)), CV_ICON);
             }
             if (toggle[ch]) {
                 gfxPrint(ch_col_x, uiLineY(3), "TOGL");
@@ -444,34 +446,20 @@ private:
                     }
                 }
             }
-            // if (update_channel_cv[ch]) {
-            //     gfxPrint((ch_col_x), 42, "u");
-            // }
-            // if (bypass_channel_cv[ch]) {
-            //     gfxPrint((9 + 31 * ch), 42, "b");
-            // }
-            // if (continuous[ch]) {
-            //     gfxPrint((17 + 31 * ch), 42, "c");
-            // }
         }
         // Draw cursor
         int cursor_ch      = cursor / 3;
         int cursor_setting = cursor % 3;
-        if (cursor_setting > 0 || interval[cursor_ch] > INTERVALIC_SCALE_DEGREE) {
-            gfxCursor(uiColX(cursor_ch), uiLineY(cursor_setting + 2) - 3, 12);
+        ch_col_x = (1 + INTERVALIC_UI_COL_WIDTH * cursor_ch);
+        if (interval[cursor_ch] <= INTERVALIC_SCALE_DEGREE) {
+            gfxCursor(ch_col_x, uiLineY(cursor_setting + ((cursor_setting > 1) ? 2 : 1)) - 3, 12);
+            gfxInvert(ch_col_x, uiLineY(cursor_setting + ((cursor_setting > 1) ? 1 : 0)) - 2, 31, INTERVALIC_UI_LINE_HEIGHT);
         } else {
-            gfxCursor(uiColX(cursor_ch), uiLineY(cursor_setting + 1) - 3, 12);
+            gfxCursor(ch_col_x, uiLineY(cursor_setting + 2) - 3, 12);
+            gfxInvert(ch_col_x, uiLineY(cursor_setting + ((cursor_setting > 0) ? 1 : 0)) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * ((cursor_setting == 0) ? 2 :1));
         }
-        if (cursor_setting == 0){
-            if (interval[cursor_ch] > INTERVALIC_SCALE_DEGREE) {
-                gfxInvert(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * 2);
-            } else {
-                gfxInvert(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT);
-            }
-        } else {
-            gfxInvert(uiColX(cursor_ch), uiLineY(cursor_setting + 1) - 2, 31, INTERVALIC_UI_LINE_HEIGHT);
-        }
-        gfxFrame(uiColX(cursor_ch), uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * 4);
+        // TODO include this when we free up more space
+        // gfxFrame(ch_col_x, uiLineY(0) - 2, 31, INTERVALIC_UI_LINE_HEIGHT * 4);
     }
 };
 
