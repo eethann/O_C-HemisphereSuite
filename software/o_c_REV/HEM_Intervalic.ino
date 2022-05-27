@@ -169,26 +169,10 @@ public:
         // operation, though that's still in progress.
         ForEachChannel(ch) {
             if (toggle[ch]) {
-                // Since we defer updating adc_offset_gate, don't start ADC if
-                // we are already waiting.
-                // Note that this might start to glitch if clock have a period of
-                // less than 33 cycles.
-                if (NoActiveADCLag(ch) && Gate(ch) != adc_offset_gate[ch]) {
-                    StartADCLag(ch);
-                }
-                if (EndOfADCLag(ch)) {
-                    adc_offset_gate[ch] = Gate(ch);
-                }
-                // This was a test to see if it worked to use continuous with toggle
-                // if (adc_offset_gate[ch]) {
-                //     continuous[ch] = false;
-                // }
-                // update_channel_cv[ch] = continuous[ch] || adc_offset_gate[ch];
-                // bypass_channel_cv[ch] = !continuous[ch] && !adc_offset_gate[ch];
-                update_channel_cv[ch] = adc_offset_gate[ch];
-                update_channel_cv_ui[ch] = update_channel_cv[ch] ? 1 : 0;
-                bypass_channel_cv[ch] = !adc_offset_gate[ch];
             } else {
+            }
+            if (interval[ch] == INTERVALIC_ADDER) {
+                // ADDERS ARE ALWAYS S/H
                 // if (Clock(ch) != adc_offset_clock[ch]) {
                 //     adc_offset_clock[ch] = Clock(ch);
                 //     if (adc_offset_clock[ch]) {
@@ -204,8 +188,9 @@ public:
                     update_channel_cv_ui[ch] = INTERVALIC_UI_SH_SHOW_TIME;
                 }
                 bypass_channel_cv[ch] = false;
-            }
-            if (interval[ch] == INTERVALIC_ADDER) {
+                
+                // TODO above was copied from more complex settings, see if we can minimize
+                
                 // If continuous, toggling (low or high), or in s/h and clocked,
                 // update adder CV. This is different from intervals, that
                 // output zero in toggle with low gate.
@@ -216,33 +201,60 @@ public:
                     } 
                     channel_cv[ch] = quantizer[ch].Process(channel_cv[ch], 0, scale_degree_sum);
                 }
-            } else if (interval[ch] == INTERVALIC_SCALE_DEGREE) {
-                if (update_channel_cv[ch]) {
-                    channel_cv[ch] = In(ch);
-                    // TODO look into using the interval approach for this
-                    // (e.g. specify an interval as scale degree, then a base amount to use)
-                    scale_degree_sum += channel_cv[ch] / 128 + base[ch];
-                } else if (bypass_channel_cv[ch]) {
-                    channel_cv[ch] = 0;
-                }
             } else {
-                // Handle interval channel
-                if (update_channel_cv[ch]) {
-                    // Read CV for this channel
-                    channel_cv[ch] = In(ch);
-                    if (interval[ch] == INTERVALIC_OFFSET) {
-                        channel_cv[ch] += base[ch] * 128;
-                    } else {
-                        // Otherwise use the CV to determine the number of intervals
-                        // TODO determine if we need to handle negative values
-                        int32_t num_intervals = base[ch] + (channel_cv[ch] / INTERVALIC_1V);
-                        // Multiply by interval amount
-                        channel_cv[ch] = simfloat2int(intervals[interval[ch]] * num_intervals);
-                    } 
-                } else if (bypass_channel_cv[ch]) {
-                    channel_cv[ch] = 0;
+             
+                // All adder inputs toggle
+
+                // Since we defer updating adc_offset_gate, don't start ADC if
+                // we are already waiting.
+                // Note that this might start to glitch if clock have a period of
+                // less than 33 cycles.
+                if (NoActiveADCLag(ch) && Gate(ch) != adc_offset_gate[ch]) {
+                    StartADCLag(ch);
                 }
-                interval_sum += channel_cv[ch];
+                if (EndOfADCLag(ch)) {
+                    adc_offset_gate[ch] = Gate(ch);
+                }
+                // This was a test to see if it worked to use continuous with toggle
+                if (adc_offset_gate[ch]) {
+                    continuous[ch] = false;
+                }
+                update_channel_cv[ch] = continuous[ch] || adc_offset_gate[ch];
+                bypass_channel_cv[ch] = !continuous[ch] && !adc_offset_gate[ch];
+                // update_channel_cv[ch] = adc_offset_gate[ch];
+                // bypass_channel_cv[ch] = !adc_offset_gate[ch];
+                update_channel_cv_ui[ch] = update_channel_cv[ch] ? 1 : 0;
+
+                // TODO see if logic can be simplified now that all adders toggle
+                
+                if (interval[ch] == INTERVALIC_SCALE_DEGREE) {
+                    if (update_channel_cv[ch]) {
+                        channel_cv[ch] = In(ch);
+                        // TODO look into using the interval approach for this
+                        // (e.g. specify an interval as scale degree, then a base amount to use)
+                        scale_degree_sum += channel_cv[ch] / 128 + base[ch];
+                    } else if (bypass_channel_cv[ch]) {
+                        channel_cv[ch] = 0;
+                    }
+                } else {
+                    // Handle interval channel
+                    if (update_channel_cv[ch]) {
+                        // Read CV for this channel
+                        channel_cv[ch] = In(ch);
+                        if (interval[ch] == INTERVALIC_OFFSET) {
+                            channel_cv[ch] += base[ch] * 128;
+                        } else {
+                            // Otherwise use the CV to determine the number of intervals
+                            // TODO determine if we need to handle negative values
+                            int32_t num_intervals = base[ch] + (channel_cv[ch] / INTERVALIC_1V);
+                            // Multiply by interval amount
+                            channel_cv[ch] = simfloat2int(intervals[interval[ch]] * num_intervals);
+                        } 
+                    } else if (bypass_channel_cv[ch]) {
+                        channel_cv[ch] = 0;
+                    }
+                    interval_sum += channel_cv[ch];
+                }
             }
             Out(ch, constrain(channel_cv[ch], -HEMISPHERE_3V_CV, HEMISPHERE_MAX_CV));
         }
@@ -257,7 +269,7 @@ public:
 
 	/* Called when the encoder button for this hemisphere is pressed */
     void OnButtonPress() {
-        cursor = (cursor + 1) % 6;
+        cursor = (cursor + 1) % 4;
         ResetCursor();
     }
 
@@ -266,15 +278,13 @@ public:
 	 * direction -1 is counterclockwise
 	 */
     void OnEncoderMove(int direction) {
-        int cursor_setting = cursor % 3;
-        int cursor_ch = cursor / 3;
+        int cursor_setting = cursor % 2;
+        int cursor_ch = cursor / 2;
         switch (cursor_setting) {
             case INTERVALIC_SETTING_INTERVAL:
             interval[cursor_ch] = (interval[cursor_ch] + direction + 21) % 21;
-            if (interval[cursor_ch] == INTERVALIC_ADDER) {
-                // Set new adder to continuous at start.
-                continuous[cursor_ch] = 1;
-            }
+            // Re-init continuous setting
+            continuous[cursor_ch] = 1;
             break;
             case INTERVALIC_SETTING_BASE_OR_SCALE:
             if (interval[cursor_ch] == INTERVALIC_ADDER) {
@@ -289,11 +299,11 @@ public:
                 base[cursor_ch] = max(min(base[cursor_ch] + direction, 12), -12);
             }
             break;
-            case INTERVALIC_SETTING_ENABLED:
-            toggle[cursor_ch] = !toggle[cursor_ch];
-            // Reset continuous operation when s/h / toggle mode is toggled
-            continuous[cursor_ch] = 1;
-            break;
+            // case INTERVALIC_SETTING_ENABLED:
+            // toggle[cursor_ch] = !toggle[cursor_ch];
+            // // Reset continuous operation when s/h / toggle mode is toggled
+            // continuous[cursor_ch] = 1;
+            // break;
         }
     }
         
@@ -426,14 +436,7 @@ private:
             if (interval[ch] != INTERVALIC_ADDER && abs(In(ch)) > 128 ) {
                 gfxIcon(ch_col_x + 20, uiLineY(1 + (interval[ch] > INTERVALIC_SCALE_DEGREE ? 1 : 0)), CV_ICON);
             }
-            if (toggle[ch]) {
-                gfxPrint(ch_col_x, uiLineY(3), "TOGL");
-                if (update_channel_cv_ui[ch]) {
-                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_ON_ICON);
-                } else {
-                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_OFF_ICON);
-                }
-            } else {
+            if (interval[ch] == INTERVALIC_ADDER) {
                 gfxPrint(ch_col_x, uiLineY(3), "S/H");
                 if (continuous[ch]) {
                     gfxIcon(ch_col_x + 24, uiLineY(3), PLAY_ICON);
@@ -445,11 +448,18 @@ private:
                         gfxIcon(ch_col_x + 24, uiLineY(3), PLAY_ICON);
                     }
                 }
+            } else {
+                gfxPrint(ch_col_x, uiLineY(3), "TOGL");
+                if (update_channel_cv_ui[ch]) {
+                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_ON_ICON);
+                } else {
+                    gfxIcon(ch_col_x + 24, uiLineY(3), CHECK_OFF_ICON);
+                }
             }
         }
         // Draw cursor
-        int cursor_ch      = cursor / 3;
-        int cursor_setting = cursor % 3;
+        int cursor_ch      = cursor / 2;
+        int cursor_setting = cursor % 2;
         ch_col_x = (1 + INTERVALIC_UI_COL_WIDTH * cursor_ch);
         if (interval[cursor_ch] <= INTERVALIC_SCALE_DEGREE) {
             gfxCursor(ch_col_x, uiLineY(cursor_setting + ((cursor_setting > 1) ? 2 : 1)) - 3, 12);
